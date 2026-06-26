@@ -1,0 +1,477 @@
+# Libraries & Pre-Processing
+
+```{r Libraies and Pre-Processing}
+# Load necessary libraries
+library(glmnet)
+library(tidymodels)
+library(dplyr)
+library(parsnip)
+library(readr) # For write_csv()
+ 
+# 1. Load data and preserve original IDs
+sp_train_original <- read.csv('C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\train.csv')
+sp_test_original <- read.csv("C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test.csv")
+ 
+ 
+# 2. Separate IDs and data for preprocessing
+sp_train_ids <- sp_train_original$Id # Store training IDs
+sp_test_ids <- sp_test_original$Id # Store test IDs
+ 
+sp_train <- sp_train_original[, -1]  # Remove ID column for training data
+sp_test <- sp_test_original[, -1] # Remove ID column for test data
+ 
+# Removing outliers
+rows_to_remove <- c(524, 1299)
+sp_train <- sp_train_original[-rows_to_remove, ]
+ 
+# 3. Create sp_trainY (outcome variable)
+sp_trainY <- sp_train$SalePrice
+ 
+# 4. Combine training and test data *before* factor conversion
+combined_data <- bind_rows(sp_train, sp_test)
+ 
+# 5. Convert character columns to factors in the COMBINED data
+combined_data <- combined_data %>%
+  mutate(across(where(is.character), as.factor))
+ 
+# 6. Split back into training and test sets
+sp_train <- combined_data %>% filter(row_number() <= nrow(sp_train))
+sp_test <- combined_data %>% filter(row_number() > nrow(sp_train))
+ 
+# 7. Separate predictors and outcome in training data
+sp_trainX <- sp_train[, -which(names(sp_train) == "SalePrice")] # All columns except SalePrice
+ 
+# 8. Create and PREPARE the recipe using the COMBINED data (but fit on training only)
+sp_recipe <- recipe(SalePrice ~ ., data = sp_train) %>% # Recipe uses training data
+  step_rm(Utilities) %>%
+  step_impute_knn(all_predictors()) %>%
+  step_novel(all_nominal_predictors()) %>%
+  step_other(all_nominal_predictors(), threshold = 0.05) %>%
+  ##########PART 1##########
+  step_mutate(
+    TotalArea = TotalBsmtSF + X1stFlrSF + X2ndFlrSF + GarageArea + OpenPorchSF + WoodDeckSF + ScreenPorch + PoolArea, 
+    Total_Bathrooms = FullBath + 0.5 * HalfBath + BsmtFullBath + 0.5 * BsmtHalfBath, 
+    AgeOfHouse = as.numeric(YrSold) - as.numeric(YearBuilt), 
+    TotalPorchSF = OpenPorchSF + EnclosedPorch + X3SsnPorch + ScreenPorch,
+    TotalFunctionalSF = TotalBsmtSF + X1stFlrSF + X2ndFlrSF
+  ) %>%
+  #Total Bath is from Bruin AgeOfHouse is mentioned in it too but we also did it in my groups project last semester
+  step_ns(LotFrontage, options = list(df = 5)) %>% # natural spline
+  step_BoxCox(LotArea) %>%
+  ##########PART 1##########
+  step_interact(terms = ~ OverallQual:TotalArea) %>%
+  step_interact(terms = ~ YearBuilt:OverallCond) %>%
+  step_interact(terms = ~ OverallQual:Neighborhood) %>%
+  step_interact(terms = ~ LotArea:Neighborhood) %>%
+  step_interact(terms = ~ AgeOfHouse:LotArea) %>%
+  step_interact(terms = ~ AgeOfHouse:YearRemodAdd) %>%
+  step_interact(terms = ~ MSZoning:TotalArea) %>%
+  step_interact(terms = ~ BsmtQual:TotalBsmtSF) %>%
+  step_interact(terms = ~ BsmtExposure:BsmtFinSF1) %>%
+  step_interact(terms = ~ MSZoning:GrLivArea) %>%
+  step_interact(terms = ~ BedroomAbvGr:GrLivArea) %>%
+  step_interact(terms = ~ GarageCars:GrLivArea) %>%
+  step_interact(terms = ~ Neighborhood:OverallQual) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_zv(all_predictors()) %>% # removes variables with a single value
+  step_normalize(all_numeric_predictors()) %>% 
+  step_nzv(all_predictors()) %>% # will potentially remove variables that are highly sparse and unbalanced.
+  step_corr(all_numeric_predictors())
+ 
+sp_recipe_prep <- prep(sp_recipe)
+ 
+ 
+# 9. Bake the training data
+sp_train_baked <- bake(sp_recipe_prep, new_data = sp_train)
+ 
+# 10. Bake the test data
+sp_test_baked <- bake(sp_recipe_prep, new_data = sp_test)
+```
+# Ridge Regression
+ 
+```{r Ridge Regression}
+# 11. Model specification (RIDGE REGRESSION - alpha = 0)
+sp_glmnet <- parsnip::linear_reg(
+  penalty = tune(), 
+  mixture = 0 # Ridge regression: mixture = 0
+) %>% 
+  set_mode("regression") %>%
+  set_engine("glmnet") 
+ 
+# 12. Workflow
+sp_wf <- workflow() %>% 
+  add_recipe(sp_recipe) %>% 
+  add_model(sp_glmnet)
+ 
+# 13. 10-fold cross-validation with 5 repeats (using the *original* training data)
+sp_kfolds <- vfold_cv(sp_train, v = 10, repeats = 5, strata = "SalePrice")
+ 
+# 14. Tune the model
+sp_tune <- tune_grid(
+  sp_wf,
+  resamples = sp_kfolds,
+  grid = 10, # You can adjust the grid size as needed
+  metrics = metric_set(rmse, rsq, mae)
+)
+ 
+# 15. Display best results
+sp_tune %>% show_best(metric = "rmse")
+sp_tune %>% show_best(metric = "mae")
+ 
+# Display best results (and get tuning parameter values)
+best_rmse <- sp_tune %>% show_best(metric = "rmse")
+print("Best RMSE Results:")
+print(best_rmse)
+ 
+best_mae <- sp_tune %>% show_best(metric = "mae")
+print("Best MAE Results:")
+print(best_mae)
+ 
+# 16. Select best tuning parameters
+sp_best_tune <- sp_tune %>% select_best(metric = "rmse")
+ 
+# Extract the optimal penalty value
+optimal_penalty <- sp_best_tune$penalty
+print(paste("Optimal Penalty (lambda):", optimal_penalty))
+ 
+# 17. Finalize workflow
+sp_final_workflow <- sp_wf %>% 
+  finalize_workflow(sp_best_tune)
+ 
+# 18. Fit the final model to the *original* training data
+sp_final_fit <- fit(sp_final_workflow, data = sp_train)
+ 
+# 19. Extract coefficients
+sp_coef_Ridge <- sp_final_fit %>%
+  fit(sp_train) %>% 
+  extract_fit_parsnip() %>%
+  tidy()
+ 
+sp_coef_Ridge
+ 
+# 20. Make predictions on the *baked* test data
+test_predictions <- predict(sp_final_fit, new_data = sp_test)
+ 
+# 21. Rename the prediction column
+test_predictions <- test_predictions %>%
+  rename(SalePrice = .pred)
+ 
+# 22. Combine IDs and predictions
+test_predictions_with_ids <- tibble(Id = sp_test_ids, SalePrice = test_predictions$SalePrice)
+ 
+# 23. Save predictions with IDs
+write_csv(test_predictions_with_ids, "C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test_predictionsRR.csv")
+ 
+```
+# LASSO
+ 
+```{r LASSO}
+# 11. Model specification (LASSO - alpha = 1)
+sp_glmnet <- parsnip::linear_reg(
+  penalty = tune(), 
+  mixture = 1 # LASSO regression: mixture = 1
+) %>% 
+  set_mode("regression") %>%
+  set_engine("glmnet") 
+ 
+# 12. Workflow
+sp_wf <- workflow() %>% 
+  add_recipe(sp_recipe) %>% 
+  add_model(sp_glmnet)
+ 
+# 13. 10-fold cross-validation with 5 repeats (using the *original* training data)
+sp_kfolds <- vfold_cv(sp_train, v = 10, repeats = 5, strata = "SalePrice")
+ 
+# 14. Tune the model
+sp_tune <- tune_grid(
+  sp_wf,
+  resamples = sp_kfolds,
+  grid = 10, # You can adjust the grid size as needed
+  metrics = metric_set(rmse, rsq, mae)
+)
+ 
+# 15. Display best results
+sp_tune %>% show_best(metric = "rmse")
+sp_tune %>% show_best(metric = "mae")
+ 
+# Display best results (and get tuning parameter values)
+best_rmse <- sp_tune %>% show_best(metric = "rmse")
+print("Best RMSE Results:")
+print(best_rmse)
+ 
+# 16. Select best tuning parameters
+sp_best_tune <- sp_tune %>% select_best(metric = "rmse")
+ 
+# 17. Finalize workflow
+sp_final_workflow <- sp_wf %>% 
+  finalize_workflow(sp_best_tune)
+ 
+# 18. Fit the final model to the *original* training data
+sp_final_fit <- fit(sp_final_workflow, data = sp_train)
+ 
+# 19. Extract coefficients
+sp_coef_LASSO <- sp_final_fit %>%
+  extract_fit_parsnip() %>%
+  tidy()
+ 
+sp_coef_LASSO
+ 
+# 20. Make predictions on the *baked* test data
+test_predictions <- predict(sp_final_fit, new_data = sp_test)
+ 
+# 21. Rename the prediction column
+test_predictions <- test_predictions %>%
+  rename(SalePrice = .pred)
+ 
+# 22. Combine IDs and predictions
+test_predictions_with_ids <- tibble(Id = sp_test_ids, SalePrice = test_predictions$SalePrice)
+ 
+# 23. Save predictions with IDs
+write_csv(test_predictions_with_ids, "C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test_predictionsL.csv")
+```
+
+# Elastic Net
+ 
+```{r Elastic Net}
+# 11. Model specification (ELASTIC NET REGRESSION)
+sp_glmnet <- parsnip::linear_reg(
+penalty = tune(),
+mixture = tune() # Tune the mixture as well
+) %>%
+set_mode("regression") %>%
+set_engine("glmnet")
+ 
+# 12. Workflow (no changes)
+sp_wf <- workflow() %>%
+add_recipe(sp_recipe) %>%
+add_model(sp_glmnet)
+ 
+# 13. 10-fold cross-validation with 5 repeats
+sp_kfolds <- vfold_cv(sp_train, v = 10, repeats = 5, strata = "SalePrice")
+ 
+# 14. Tune the model (important change here!)
+sp_tune <- tune_grid(
+sp_wf,
+resamples = sp_kfolds,
+grid = grid_regular(penalty(range = c(-10, 0)), # Example penalty range
+         mixture(range = c(0, 1)), # Mixture range 0 to 1
+         levels = 10), # Adjust levels as needed
+metrics = metric_set(rmse, rsq, mae)
+)
+ 
+# 15. Display best results
+sp_tune %>% show_best(metric = "rmse")
+sp_tune %>% show_best(metric = "mae")
+ 
+# 16. Select best tuning parameters
+sp_best_tune <- sp_tune %>% select_best(metric = "rmse")
+ 
+# 17. Finalize workflow
+sp_final_workflow <- sp_wf %>% 
+  finalize_workflow(sp_best_tune)
+ 
+# 18. Fit the final model to the *original* training data
+sp_final_fit <- fit(sp_final_workflow, data = sp_train)
+ 
+# 19. Extract coefficients
+sp_coef_EN <- sp_final_fit %>%
+  extract_fit_parsnip() %>%
+  tidy()
+ 
+sp_coef_EN
+ 
+# 20. Make predictions on the *baked* test data
+test_predictions <- predict(sp_final_fit, new_data = sp_test)
+ 
+# 21. Rename the prediction column
+test_predictions <- test_predictions %>%
+  rename(SalePrice = .pred)
+ 
+# 22. Combine IDs and predictions
+test_predictions_with_ids <- tibble(Id = sp_test_ids, SalePrice = test_predictions$SalePrice)
+ 
+# 23. Save predictions with IDs
+write_csv(test_predictions_with_ids, "C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test_predictionsEN.csv")
+```
+
+# Data Assignment Questions and extras
+ 
+```{r DA Steps}
+library(ggplot2)
+library(mgcv)
+library(caret)
+ 
+#Part 2
+nearZeroVar(sp_train)
+colnames(sp_train)[nearZeroVar(sp_train)]
+ 
+#Part 3
+# Method 2: Using names() and sapply() (base R)
+continuous_vars <- names(sp_train)[sapply(sp_train, is.numeric)]
+print(continuous_vars)
+ 
+plot_variable <- function(data, variable_name) {
+  plot <- ggplot(data, aes(x = .data[[variable_name]], y = SalePrice)) +
+    geom_point() +
+    labs(title = paste("Scatterplot of SalePrice vs.", variable_name),
+         x = variable_name,
+         y = "SalePrice") +
+    theme_bw()
+  print(plot)
+}
+ 
+p1 <- plot_variable(sp_train, "LotArea")
+p2 <- plot_variable(sp_train, "TotalBsmtSF")
+p3 <- plot_variable(sp_train, "GarageArea")
+p4 <- plot_variable(sp_train, "EnclosedPorch")
+p5 <- plot_variable(sp_train, "PoolArea")
+p6 <- plot_variable(sp_train, "GrLivArea")
+p7 <- plot_variable(sp_train, "WoodDeckSF")
+p8 <- plot_variable(sp_train, "LotFrontage")
+p9 <- plot_variable(sp_train, "OpenPorchSF")
+p10 <- plot_variable(sp_train, "ScreenPorch")
+# LotFrontage seems the least linear
+ 
+library(ggpubr)
+ 
+# Arrange plots in a 3x4 grid
+ggarrange(p1, p2, p3, p4, p5, p6, p7, p8, p9, p10,
+          ncol = 3, nrow = 4)
+ 
+ 
+ 
+# Part 4 D
+# --- Variable Tracking and Summary Function ---
+track_and_summarize_variables <- function(original_data, baked_data, model_coef, model_name) {
+ 
+  # 1. Original Variables (from sp_train_original)
+  original_variables <- names(original_data[, -which(names(original_data) == "SalePrice")])
+ 
+  # 2. Variables After Baking (from sp_train_baked)
+  baked_variables <- names(baked_data[, -which(names(baked_data) == "SalePrice")])
+ 
+  # 3. Variables with Coefficients (from model_coef)
+  coef_variables <- model_coef$term  # or model_coef %>% pull(term)
+ 
+  # 4. Variables Retained in the Model (coefficients not equal to zero)
+  retained_vars <- model_coef %>%
+    filter(estimate != 0) %>%
+    pull(term)
+ 
+  # 5. Variables Removed During Preprocessing (Baked - Original)
+  removed_preprocessing <- setdiff(original_variables, baked_variables)
+ 
+  # 6. Variables Removed by the Model (Baked - Retained)
+  removed_model <- setdiff(baked_variables, retained_vars)
+ 
+  cat("\n---", model_name, "Variable Summary ---\n")
+  cat("Original Variables:\n")
+  print(original_variables)
+  cat("\nVariables After Preprocessing (Baked):\n")
+  print(baked_variables)
+  cat("\nVariables with Coefficients:\n")
+  print(coef_variables)
+  cat("\nVariables Retained by", model_name, ":\n")
+  print(retained_vars)
+  cat("\nVariables Removed During Preprocessing:\n")
+  print(removed_preprocessing)
+  cat("\nVariables Removed by", model_name, ":\n")
+  print(removed_model)
+  cat("--------------------------------------------\n")
+ 
+    return(list(original = original_variables, baked = baked_variables, coef = coef_variables, retained = retained_vars, removed_preprocessing = removed_preprocessing, removed_model = removed_model))
+}
+ 
+# --- Ridge Regression Variable Tracking ---
+ridge_summary <- track_and_summarize_variables(sp_train_original, sp_train_baked, sp_coef_Ridge, "Ridge Regression")
+ 
+# --- LASSO Variable Tracking ---
+lasso_summary <- track_and_summarize_variables(sp_train_original, sp_train_baked, sp_coef_LASSO, "LASSO") # Replace sp_coef_lasso
+ 
+# --- Elastic Net Variable Tracking ---
+en_summary <- track_and_summarize_variables(sp_train_original, sp_train_baked, sp_coef_EN, "Elastic Net") # Replace sp_coef_en
+ 
+ 
+track_final_model_variables <- function(model_coef, model_name) {
+  # Extract variables with nonzero coefficients (final model variables)
+  final_vars <- model_coef %>%
+    filter(estimate != 0) %>%
+    pull(term)
+ 
+  cat("\n---", model_name, "Final Model Variables ---\n")
+  print(final_vars)
+  cat("--------------------------------------------\n")
+ 
+  return(final_vars)
+}
+ 
+# --- Ridge Regression Final Variables ---
+ridge_final_vars <- track_final_model_variables(sp_coef_Ridge, "Ridge Regression")
+ 
+# --- LASSO Final Variables ---
+lasso_final_vars <- track_final_model_variables(sp_coef_LASSO, "LASSO")
+ 
+# --- Elastic Net Final Variables ---
+en_final_vars <- track_final_model_variables(sp_coef_EN, "Elastic Net")
+ 
+ 
+library(tidymodels)
+library(car)  # For influence plot
+ 
+# Extract nonzero coefficients from Elastic Net model
+sp_coef_EN <- sp_final_fit %>%
+  extract_fit_parsnip() %>%
+  tidy()
+ 
+# Get significant predictors (excluding intercept)
+important_vars <- sp_coef_EN %>%
+  filter(estimate != 0, term != "(Intercept)") %>%
+  pull(term)
+ 
+# Create a formula for a linear model using only selected predictors
+formula_lm <- as.formula(paste("SalePrice ~", paste(important_vars, collapse = " + ")))
+ 
+# Fit an equivalent linear model (lm) using selected variables
+final_model_lm <- lm(formula_lm, data = sp_train_baked)
+ 
+# Influence plot using car package
+influencePlot(final_model_lm, id.method = "identify", main = "Influence Plot")
+ 
+# Identify influential points based on Cook's Distance
+influential_points <- which(cooks.distance(final_model_lm) > (4 / nrow(sp_train)))
+print("Influential Points Identified by Cook's Distance:")
+print(influential_points)
+ 
+# Diagnostics: Leverage and studentized residuals
+leverage <- hatvalues(final_model_lm)
+studentized_residuals <- rstudent(final_model_lm)
+ 
+# Check for high-leverage points
+high_leverage_points <- which(leverage > (2 * mean(leverage)))
+print("High Leverage Points:")
+print(high_leverage_points)
+ 
+####PART 4B ####
+library(ggplot2)
+library(tidymodels)
+library(glmnet)
+ 
+# 1. Convert training data to a matrix format for glmnet
+x_train <- as.matrix(select(sp_train_baked, -SalePrice))
+y_train <- sp_train_baked$SalePrice
+ 
+# 2. Fit Ridge (alpha = 0), LASSO (alpha = 1), and Elastic Net (alpha = 0.5)
+ridge_fit <- glmnet(x_train, y_train, alpha = 0) # Ridge
+lasso_fit <- glmnet(x_train, y_train, alpha = 1) # LASSO
+en_fit <- glmnet(x_train, y_train, alpha = 0.5)  # Elastic Net
+ 
+# 3. Plot coefficient paths
+par(mfrow = c(1, 3))  # Arrange plots in a row
+ 
+plot(ridge_fit, xvar = "lambda", label = TRUE, main = "Ridge Regression Paths")
+plot(lasso_fit, xvar = "lambda", label = TRUE, main = "LASSO Regression Paths")
+plot(en_fit, xvar = "lambda", label = TRUE, main = "Elastic Net Paths")
+ 
+par(mfrow = c(1,1))  # Reset plotting layout
+ 
+```
