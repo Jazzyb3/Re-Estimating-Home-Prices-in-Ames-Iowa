@@ -9,8 +9,8 @@ library(parsnip)
 library(readr) # For write_csv()
  
 # 1. Load data and preserve original IDs
-sp_train_original <- read.csv('C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\train.csv')
-sp_test_original <- read.csv("C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test.csv")
+sp_train_original <- read.csv(file.choose())
+sp_test_original <- read.csv(file.choose())
  
  
 # 2. Separate IDs and data for preprocessing
@@ -160,7 +160,7 @@ test_predictions <- test_predictions %>%
 test_predictions_with_ids <- tibble(Id = sp_test_ids, SalePrice = test_predictions$SalePrice)
  
 # 23. Save predictions with IDs
-write_csv(test_predictions_with_ids, "C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test_predictionsRR.csv")
+write_csv(test_predictions_with_ids, file.choose())
  
 ```
 # LASSO
@@ -227,7 +227,7 @@ test_predictions <- test_predictions %>%
 test_predictions_with_ids <- tibble(Id = sp_test_ids, SalePrice = test_predictions$SalePrice)
  
 # 23. Save predictions with IDs
-write_csv(test_predictions_with_ids, "C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test_predictionsL.csv")
+write_csv(test_predictions_with_ids, file.choose())
 ```
 
 # Elastic Net
@@ -291,7 +291,7 @@ test_predictions <- test_predictions %>%
 test_predictions_with_ids <- tibble(Id = sp_test_ids, SalePrice = test_predictions$SalePrice)
  
 # 23. Save predictions with IDs
-write_csv(test_predictions_with_ids, "C:\\Users\\jasmi\\OneDrive - Southern Methodist University\\6302\\Data Assignments\\DA1\\test_predictionsEN.csv")
+write_csv(test_predictions_with_ids, file.choose())
 ```
 
 # Data Assignment Questions and extras
